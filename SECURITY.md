@@ -17,8 +17,8 @@ through it, for example:
   notes;
 - command injection through API parameters (session names, models, project
   paths) or path traversal out of `PROJECTS_ROOT`;
-- the public-address refusal (`COUCHDECK_ALLOW_PUBLIC`) or the host allowlist
-  being bypassable;
+- the public-address refusal (`COUCHDECK_ALLOW_PUBLIC`), the Tailscale login
+  check (`COUCHDECK_TAILSCALE_USERS`) or the host allowlist being bypassable;
 - a request that can wedge or crash the tmux server for every session.
 
 Known and accepted: no rate limiting on session create or attach.

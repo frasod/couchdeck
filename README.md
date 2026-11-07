@@ -108,6 +108,7 @@ All settings are environment variables, read from `.env` by `scripts/run.sh`.
 | `COUCHDECK_HOSTS` | none | Extra host names the app answers to (reverse proxy, CNAME). |
 | `COUCHDECK_ORIGINS` | none | Extra origins allowed to open the terminal WebSocket. |
 | `COUCHDECK_ALLOW_PUBLIC` | off | Allow requests on a public IP. Don't. |
+| `COUCHDECK_TAILSCALE_USERS` | none | Tailscale logins allowed in, comma-separated. See [Only your Tailscale login](#only-your-tailscale-login). |
 
 ### Launchers
 
@@ -172,6 +173,27 @@ layer adds its own login. The public-address check sees the address the
 request arrived on, not who sent it, so a request forwarded from outside looks
 like a private one and gets a shell. `tailscale serve` is fine: it stays
 inside your tailnet.
+
+### Only your Tailscale login
+
+By default anyone who can reach the port gets in. Behind `tailscale serve` you
+can narrow that to your own Tailscale account, so a shared node or a guest's
+device on your tailnet can't open a shell either:
+
+```bash
+echo 'COUCHDECK_TAILSCALE_USERS=you@example.com' >> ~/couchdeck/.env
+```
+
+Use the login `tailscale status` shows for you. With this set:
+
+- Only requests that `tailscale serve` forwards from one of these logins get
+  in. serve replaces any `Tailscale-User-Login` header the client sent with
+  the real one, and sends none for Funnel or for tagged nodes, so those are
+  refused too.
+- Direct connections to the port from other devices are refused, even with a
+  forged header, so open couchdeck only at its `https://….ts.net` address.
+- Programs running on the machine itself can still connect, as with any local
+  service; they already run as a user of that machine.
 
 Known gap: no rate limiting. To report a vulnerability, see
 [SECURITY.md](SECURITY.md).

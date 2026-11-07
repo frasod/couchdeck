@@ -58,6 +58,15 @@ EXTRA_HOSTS = {
 # on a publicly routable local address unless this is set.
 ALLOW_PUBLIC = os.environ.get("COUCHDECK_ALLOW_PUBLIC", "").strip() in ("1", "true", "yes")
 
+# Tailscale logins allowed in, comma-separated. When set, a request is let in
+# only if it came through `tailscale serve` on this machine and serve says it
+# is from one of these logins. serve replaces any Tailscale-User-Login header
+# the client sent with the real one, and sends none for Funnel or tagged nodes.
+TAILSCALE_USERS = {
+    u.strip().lower()
+    for u in os.environ.get("COUCHDECK_TAILSCALE_USERS", "").split(",") if u.strip()
+}
+
 
 def _split_host(host: str) -> tuple[str, str]:
     """`name:port` / `[v6]:port` -> (name, port). Port may be empty."""
@@ -136,6 +145,37 @@ def listener_ok(server: tuple | None) -> bool:
         return True
 
 
+def from_this_machine(client: tuple | None, server: tuple | None) -> bool:
+    """True when the connection was opened on this machine: from loopback, or
+    from the very address it arrived on (which is how `tailscale serve`
+    connects to a listener on the Tailscale IP). Another tailnet device can't
+    send from this machine's address, so only a local proxy can pass, and only
+    a local proxy's Tailscale-User-Login header can be believed. A Unix socket
+    (no address) is local by definition."""
+    if not client:
+        return True
+    try:
+        if ipaddress.ip_address(client[0]).is_loopback:
+            return True
+    except ValueError:
+        return False
+    return bool(server) and client[0] == server[0]
+
+
+def identity_problem(scope, headers) -> str | None:
+    """Why COUCHDECK_TAILSCALE_USERS refuses this request, or None to let it in."""
+    if not TAILSCALE_USERS:
+        return None
+    if not from_this_machine(scope.get("client"), scope.get("server")):
+        return "direct connections are refused; open couchdeck through tailscale serve"
+    login = headers.get("tailscale-user-login", "").strip().lower()
+    if not login:
+        return "no Tailscale login; open couchdeck through tailscale serve"
+    if login not in TAILSCALE_USERS:
+        return "this Tailscale login is not allowed (COUCHDECK_TAILSCALE_USERS)"
+    return None
+
+
 def origin_ok(headers) -> bool:
     """WebSockets are exempt from same-origin policy, and a cross-site form
     POST needs no preflight, so without this check any page the browser visits
@@ -158,9 +198,10 @@ SECURITY_HEADERS = [
 
 
 class RequestGate:
-    """Host allowlist, public-listener guard, cross-origin writes, and security
-    headers, for HTTP and WebSocket alike. ASGI middleware rather than a
-    FastAPI dependency so nothing (static files, a future route) can skip it."""
+    """Host allowlist, public-listener guard, Tailscale login check,
+    cross-origin writes, and security headers, for HTTP and WebSocket alike.
+    ASGI middleware rather than a FastAPI dependency so nothing (static files,
+    a future route) can skip it."""
 
     def __init__(self, app):
         self.app = app
@@ -175,6 +216,11 @@ class RequestGate:
                         scope.get("server"))
             reason = "refusing a public listener: couchdeck has no login (COUCHDECK_ALLOW_PUBLIC)"
             return await self._deny(scope, receive, send, reason)
+        problem = identity_problem(scope, headers)
+        if problem:
+            log.warning("refused %s from %s (login %r): %s", scope.get("path"),
+                        scope.get("client"), headers.get("tailscale-user-login"), problem)
+            return await self._deny(scope, receive, send, problem)
         if not host_ok(headers.get("host")):
             return await self._deny(scope, receive, send, "unknown host (COUCHDECK_HOSTS)")
         if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):

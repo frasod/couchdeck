@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 VENDORED = {"server/static/xterm.js", "server/static/xterm.css",
             "server/static/xterm-addon-fit.js", "server/static/xterm-addon-unicode11.js"}
 # Addresses that are fine in public files: test fixtures and documentation ranges.
-ALLOWED_IPS = {"100.64.0.7", "127.0.0.1", "0.0.0.0", "192.168.1.5"}
+ALLOWED_IPS = {"100.64.0.7", "100.64.0.9", "127.0.0.1", "0.0.0.0", "192.168.1.5"}
 ALLOWED_TS_NAMES = {"box.tail123.ts.net", "other.tail123.ts.net"}
 
 
@@ -74,7 +74,8 @@ def test_no_home_paths_or_email_addresses():
             if m not in ("/home/you",):
                 bad.append(f"{rel}: {m}")
         for m in re.findall(r"[\w.+-]+@[\w-]+\.(?:com|net|org|io)\b", text):
-            bad.append(f"{rel}: {m}")
+            if not m.endswith("@example.com"):  # reserved for docs (RFC 2606)
+                bad.append(f"{rel}: {m}")
     assert not bad, bad
 
 

@@ -166,6 +166,13 @@ What it does to keep that boundary honest:
   `nosniff`; treats session names and pane text as untrusted.
 - Validates session names against an allowlist and shell-quotes model ids.
 
+**Don't put anything between the internet and couchdeck** (Tailscale Funnel,
+a reverse proxy, a router port forward, a Docker port mapping) unless that
+layer adds its own login. The public-address check sees the address the
+request arrived on, not who sent it, so a request forwarded from outside looks
+like a private one and gets a shell. `tailscale serve` is fine: it stays
+inside your tailnet.
+
 Known gap: no rate limiting. To report a vulnerability, see
 [SECURITY.md](SECURITY.md).
 

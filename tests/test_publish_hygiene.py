@@ -78,13 +78,38 @@ def test_no_home_paths_or_email_addresses():
     assert not bad, bad
 
 
+def _private_words(path: Path) -> tuple[list[str], list[str]]:
+    """(words, allowed phrases). One entry per line; `#` starts a comment and
+    `!` marks an exact phrase that may ship even though it contains a word,
+    e.g. `!github.com/<you>/couchdeck` for the repo's own URL."""
+    lines = [l.strip().lower() for l in path.read_text().splitlines()]
+    lines = [l for l in lines if l and not l.startswith("#")]
+    return ([l for l in lines if not l.startswith("!")],
+            [l[1:] for l in lines if l.startswith("!") and len(l) > 1])
+
+
 def test_no_private_words():
     """Names that must never ship live outside the repo, one per line."""
     path = Path(os.environ.get("COUCHDECK_PRIVATE_WORDS",
                                Path.home() / ".config" / "couchdeck" / "private-words.txt"))
     if not path.is_file():
         pytest.skip(f"no {path}")
-    words = [w.strip().lower() for w in path.read_text().splitlines()
-             if w.strip() and not w.startswith("#")]
-    bad = [f"{rel}: {w}" for rel, text in _texts() for w in words if w in text.lower()]
+    words, allowed = _private_words(path)
+    bad = []
+    for rel, text in _texts():
+        text = text.lower()
+        for phrase in allowed:
+            text = text.replace(phrase, "")
+        bad += [f"{rel}: {w}" for w in words if w in text]
     assert not bad, bad
+
+
+def test_allowed_phrases_do_not_hide_other_uses(tmp_path):
+    f = tmp_path / "words.txt"
+    f.write_text("# comment\nalice\n!github.com/alice/couchdeck\n")
+    words, allowed = _private_words(f)
+    assert words == ["alice"] and allowed == ["github.com/alice/couchdeck"]
+    text = "clone github.com/alice/couchdeck, ask alice"
+    for phrase in allowed:
+        text = text.replace(phrase, "")
+    assert "alice" in text  # the bare name is still caught

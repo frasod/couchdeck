@@ -11,7 +11,6 @@ as [Tailscale](https://tailscale.com). **It has no login.** Anyone who can
 reach the page gets a shell as the user running it. Read [Security](#security)
 before you expose it anywhere.
 
-<!-- Screenshots: replace these placeholders before publishing. -->
 | Deck | Attached | New session |
 |---|---|---|
 | ![Deck of session cards](docs/screenshots/deck.png) | ![Attached terminal with key bar](docs/screenshots/attached.png) | ![New-session dialog](docs/screenshots/new-session.png) |
@@ -48,7 +47,7 @@ before you expose it anywhere.
 ## Install
 
 ```bash
-git clone https://github.com/OWNER/couchdeck.git ~/couchdeck
+git clone https://github.com/frasod/couchdeck.git ~/couchdeck
 cd ~/couchdeck
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt

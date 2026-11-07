@@ -207,7 +207,8 @@ def test_page_carries_none_of_your_private_words():
                                Path.home() / ".config" / "couchdeck" / "private-words.txt"))
     if not path.is_file():
         pytest.skip(f"no {path}")
-    words = [w.strip() for w in path.read_text().splitlines() if w.strip() and not w.startswith("#")]
+    words = [w.strip() for w in path.read_text().splitlines()
+             if w.strip() and not w.startswith(("#", "!"))]  # "!" = allowed phrase
     found = [w for w in words if w.lower() in INDEX.lower()]
     assert not found, f"private words in index.html: {found}"
 

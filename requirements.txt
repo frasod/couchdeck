@@ -1,0 +1,9 @@
+fastapi==0.140.7
+uvicorn==0.51.0
+uvloop==0.22.1
+httptools==0.8.0
+websockets==16.1.1
+pydantic==2.13.4
+# tests
+pytest==9.1.1
+httpx==0.28.1

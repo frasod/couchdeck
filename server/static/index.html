@@ -1,0 +1,1408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- interactive-widget: Android Chrome shrinks the layout viewport for the soft
+     keyboard instead of overlaying it. iOS (all browsers are WebKit there)
+     ignores it, which is why the visualViewport pinning below stays. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>couchdeck</title>
+<link rel="manifest" href="/static/manifest.json">
+<link rel="stylesheet" href="/static/xterm.css">
+<style>
+  * { box-sizing: border-box; }
+  /* #ctrlbar and the deck set display: flex from an ID selector, which outranks
+     the UA [hidden] rule and leaves them on screen when JS sets .hidden. */
+  [hidden] { display: none !important; }
+
+  /* Light is the base, not an override: the theme attribute is set by a script
+     at the end of <body>, so whatever :root says is what paints first. With
+     dark here, a light-theme user got a dark flash on every load. */
+  /* The Claude app's palette: warm off-white / charcoal, with a
+     dusty-rose accent in place of Claude's clay orange.
+     Fonts are the phone's own (Claude's are licensed, and nothing loads from
+     off-box): sans for controls, a serif for reading text as Claude's replies
+     use, New York on iPhone and Noto Serif on Android. Weights stay light,
+     500 where the old look used 600. */
+  :root {
+    --bg: #faf9f5; --panel: #ffffff; --line: #dedcd1; --fg: #141413;
+    --muted: #73726c; --accent: #c2457a; --accent-fg: #ffffff;
+    --ok: #2ea043; --busy: #b8860b; --danger-bg: #fbe3e6; --danger-fg: #b3232b;
+    --sans: ui-sans-serif, -apple-system, system-ui, "Segoe UI", Roboto, "Inter", sans-serif;
+    --serif: ui-serif, "New York", "Iowan Old Style", Georgia, "Noto Serif", "Source Serif 4", serif;
+  }
+  html[data-theme="dark"] {
+    --bg: #262624; --panel: #30302e; --line: #44433f; --fg: #faf9f5;
+    --muted: #a6a39b; --accent: #d65f8f; --accent-fg: #ffffff;
+    --ok: #2ea043; --busy: #d99a1a; --danger-bg: #3d2420; --danger-fg: #ff8a7a;
+  }
+
+  html, body { height: 100%; overscroll-behavior: none; }
+  body {
+    margin: 0; font-family: var(--sans);
+    background: var(--bg); color: var(--fg); display: flex; flex-direction: column;
+    height: 100dvh; position: fixed; inset: 0; width: 100%; overflow: hidden;
+  }
+
+  /* --- top bar --- */
+  #topbar {
+    display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid var(--line);
+    flex: none; align-items: center; background: var(--panel);
+  }
+  #title { font-size: 15px; font-weight: 500; flex: 1; min-width: 0;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #topbar button {
+    padding: 8px 12px; border-radius: 8px; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); font-size: 15px; flex: none; cursor: pointer;
+  }
+  /* Inline SVG: iOS ignores font-size on ⟳, and ＋/⚙ render thin. */
+  #refreshBtn, #newBtn, #settingsBtn {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 8px 10px; line-height: 0;
+  }
+  #refreshBtn svg, #newBtn svg, #settingsBtn svg { width: 20px; height: 20px; display: block; }
+
+  /* --- deck (session cards) --- */
+  #deck { flex: 1; display: flex; flex-direction: column; gap: 8px; padding: 10px;
+          overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .card {
+    display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    cursor: pointer;
+  }
+  .card .body { flex: 1; min-width: 0; }
+  .card .name { font-size: 15px; font-weight: 500; overflow: hidden;
+                text-overflow: ellipsis; white-space: nowrap; }
+  .card .sub { font-size: 12px; color: var(--muted); margin-top: 3px; overflow: hidden;
+               text-overflow: ellipsis; white-space: nowrap; }
+  /* Last lines of the pane: what the agent said or is asking, without attaching. */
+  .card .preview { margin-top: 6px; font: 11.5px/1.35 "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+                   color: var(--muted); }
+  .card .preview div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .menu { flex: none; padding: 6px 10px; border-radius: 8px; background: var(--bg);
+                border: 1px solid var(--line); color: var(--muted); font-size: 15px; cursor: pointer; }
+  .card .badge {
+    flex: none; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+    background: var(--busy); color: #fff; font: 700 11px/18px var(--sans);
+    text-align: center;
+  }
+
+  .dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .card.attached .dot { background: var(--ok); }
+  .card.busy .dot { background: var(--busy); }
+  #deckEmpty, #deckNoMatch { color: var(--muted); font-size: 14px; text-align: center; padding: 30px 20px; }
+  /* Sticky inside the scrolling deck; the shadow paints over the deck's top
+     padding so cards don't peek out above the box. 16px stops iOS zooming. */
+  #deckFilter {
+    position: sticky; top: 0; z-index: 1; flex: none; width: 100%;
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px; font-size: 16px;
+    box-shadow: 0 -10px 0 var(--bg);
+  }
+
+  /* --- CLI guide --- */
+  #help { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
+  #helpTabs {
+    display: flex; gap: 6px; padding: 8px; overflow-x: auto; flex: none;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+    -webkit-overflow-scrolling: touch;
+  }
+  #helpTabs button {
+    flex: none; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); font-size: 14px; font-weight: 500; cursor: pointer;
+  }
+  #helpTabs button.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  #helpBody { flex: 1; overflow-y: auto; padding: 12px 14px 28px; -webkit-overflow-scrolling: touch; }
+  #helpBody section h2 { font: 500 19px/1.3 var(--serif); margin: 0 0 6px; }
+  #helpBody p, #helpBody li { font: 15px/1.5 var(--serif); }
+  #helpBody .note {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; margin: 0 0 12px;
+  }
+  #helpBody #launcherNotes h3 { margin-top: 0; }
+  #helpBody h3 { font-size: 13px; color: var(--muted); margin: 16px 0 4px; letter-spacing: 0.02em; }
+  #helpBody dl { margin: 0; }
+  #helpBody dt { font: 600 13.5px/1.35 "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; margin-top: 10px; }
+  #helpBody dd { margin: 2px 0 0; color: var(--muted); font: 14.5px/1.45 var(--serif); }
+  #helpBody code { font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em; }
+
+  /* --- terminal --- */
+  /* Bottom padding only: a small gap between the TUI prompt and the key bar /
+     soft keyboard. Fit subtracts this padding explicitly (see fitTerminal). */
+  #term {
+    flex: 1; min-height: 0; padding: 0 0 12px; touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  #term .xterm {
+    height: 100%; touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+  }
+  /* xterm's hidden textarea is what iOS actually selects on a long-press. */
+  #term .xterm-helper-textarea, #term canvas {
+    -webkit-user-select: none !important; user-select: none !important;
+    -webkit-touch-callout: none !important;
+  }
+  #status { flex: none; padding: 4px 10px; font-size: 12px; color: var(--muted);
+            background: var(--panel); border-top: 1px solid var(--line); }
+  /* A status you can act on ("tap here to take it back"): big enough to hit. */
+  #status.tap { padding: 12px 10px; font-size: 15px; font-weight: 500; color: var(--accent);
+                cursor: pointer; text-align: center; }
+
+  /* --- compose bar --- */
+  /* Text for the agent is typed here, not into xterm.js's hidden textarea.
+     Android keyboards (Gboard, Samsung) deliver every key as an IME
+     composition, and xterm.js's composition diffing drops or doubles letters
+     ("did we" arrived in grok as "id e"; xterm.js #3600). A real textarea is
+     where predictive text works. ⌨ switches to typing into the terminal. */
+  #composebar {
+    display: flex; gap: 6px; padding: 8px 8px 0; flex: none; align-items: flex-end;
+    background: var(--panel); border-top: 1px solid var(--line);
+  }
+  #compose {
+    flex: 1; min-width: 0; margin: 0; display: block; resize: none;
+    /* 16px: iOS zooms the page when a smaller-font field takes focus. */
+    font: 16px/1.35 var(--sans);
+    padding: 9px 10px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); max-height: 7.5em; overflow-y: auto;
+    /* Keep text editable; hide the iOS Copy/Look Up bubble on long-press. */
+    -webkit-touch-callout: none;
+  }
+  #sendBtn {
+    flex: none; min-width: 46px; padding: 9px 12px; border-radius: 10px; border: none;
+    background: var(--accent); color: var(--accent-fg); font-size: 16px; font-weight: 500; cursor: pointer;
+  }
+  #composebar:not([hidden]) + #ctrlbar { border-top: none; padding-top: 8px; }
+
+  /* --- key bar --- */
+  #ctrlbar {
+    display: flex; gap: 6px; padding: 10px 8px 12px; overflow-x: auto; border-top: 1px solid var(--line);
+    flex: none; background: var(--panel); -webkit-overflow-scrolling: touch;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
+  #ctrlbar button {
+    flex: none; min-width: 42px; padding: 9px 10px; border-radius: 8px; background: var(--bg);
+    border: 1px solid var(--line); color: var(--fg); font-size: 14px; font-weight: 500; cursor: pointer;
+  }
+  #ctrlbar button.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  /* Hide/show keyboard. SVG, like the top bar: glyphs render thin per phone font.
+     The arrow shows what a tap will do: down = hide, up = show. Not a keyboard
+     icon: that would read as a twin of the ⌨ typing-mode button beside it. */
+  #hideKbBtn { display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+  #hideKbBtn svg { width: 22px; height: 22px; display: block; }
+  #hideKbBtn .kbShow, #hideKbBtn.kbDown .kbHide { display: none; }
+  #hideKbBtn.kbDown .kbShow { display: block; }
+
+  /* --- dialogs --- */
+  dialog {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px; width: min(92vw, 400px);
+  }
+  dialog::backdrop { background: #0009; }
+  dialog label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  dialog input, dialog select {
+    width: 100%; background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px; font-size: 15px;
+  }
+  #cProjectFilter { margin-bottom: 6px; }
+  dialog .row { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; align-items: center; }
+  dialog button { padding: 9px 16px; border-radius: 8px; border: none; font-size: 15px; cursor: pointer; }
+  .primary { background: var(--accent); color: var(--accent-fg); }
+  .secondary { background: var(--bg); color: var(--fg); border: 1px solid var(--line); }
+  #killBtn { background: var(--danger-bg); color: var(--danger-fg); margin-right: auto; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  #sessDlgCmd {
+    font: 12px/1.35 "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word; max-height: 6em; overflow: auto;
+    background: var(--bg); padding: 8px; border-radius: 8px; margin-top: 8px;
+  }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <button id="backBtn" hidden>‹</button>
+  <span id="title">couchdeck</span>
+  <button id="helpBtn" title="What each CLI is, and the slash commands worth knowing">CLIs</button>
+  <button id="refreshBtn" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg></button>
+  <button id="newBtn" title="New session" aria-label="New session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" d="M12 4v16M4 12h16"/></svg></button>
+  <button id="settingsBtn" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.47.47 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.47.47 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg></button>
+</div>
+
+<div id="deck">
+  <input id="deckFilter" type="search" placeholder="Search sessions…" aria-label="Search sessions" enterkeyhint="go" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" hidden>
+  <div id="deckNoMatch" hidden>No session matches.</div>
+  <div id="deckEmpty" hidden>No tmux sessions. Tap ＋ to start a coding agent in a project.</div>
+</div>
+
+<div id="help" hidden>
+  <div id="helpTabs" role="tablist">
+    <button type="button" class="active" data-help="grok">Grok</button>
+    <button type="button" data-help="claude">Claude</button>
+    <button type="button" data-help="codex">Codex</button>
+    <button type="button" data-help="opencode">OpenCode</button>
+    <button type="button" data-help="shell">Shell</button>
+    <button type="button" data-help="agy">Antigravity</button>
+  </div>
+  <div id="helpBody">
+    <!-- Filled from the "note" fields in launchers.json; hidden when none. -->
+    <div id="launcherNotes" class="note" hidden>
+      <h3>Your launchers</h3>
+      <dl id="launcherNotesList"></dl>
+    </div>
+    <section id="help-grok">
+      <h2>Grok</h2>
+      <p class="note">Grok reads Claude’s project instructions on its own. A <code>CLAUDE.md</code> in the repo, <code>.claude/CLAUDE.md</code>, the same names under <code>~/.claude/</code>, and markdown in <code>.claude/rules/</code> and <code>~/.claude/rules/</code> are loaded as rules. It also picks up Claude skills, permission rules in <code>.claude/settings.json</code>, MCP servers from <code>~/.claude.json</code>, and hooks from Claude’s settings. <code>/import-claude</code> copies permissions, environment variables, MCP servers, hooks, and paths into Grok’s own config.</p>
+      <p>Claude’s auto-memory is a different folder: <code>~/.claude/projects/…/memory/MEMORY.md</code>. Grok leaves that folder alone. <code>/memory</code> inside Claude edits <code>CLAUDE.md</code> and that auto-memory. <code>/memory</code> inside Grok is Grok’s own notes under <code>~/.grok/memory</code>.</p>
+      <h3>Slash commands</h3>
+      <p>Type <code>/</code> for the full list.</p>
+      <dl>
+        <dt>/plan</dt><dd>Think the change through before editing. Shift+Tab cycles Normal, Plan, Auto, Always-approve.</dd>
+        <dt>/always-approve</dt><dd>Skip ordinary permission prompts. <code>/auto</code> lets a classifier approve safe calls and still ask about the rest.</dd>
+        <dt>/compact</dt><dd>Shrink the conversation so the window does not fill up. <code>/context</code> shows what is using it.</dd>
+        <dt>/model</dt><dd>Switch model. <code>/effort</code> sets reasoning to low, medium, high, or xhigh.</dd>
+        <dt>/resume</dt><dd>Open an earlier session. <code>/new</code> starts a fresh one.</dd>
+        <dt>/rewind</dt><dd>Roll the conversation back to an earlier turn.</dd>
+        <dt>/remember</dt><dd>Save a note now. <code>/flush</code> writes what this session learned. <code>/dream</code> tidies notes. <code>/memory</code> browses them.</dd>
+        <dt>/import-claude</dt><dd>Copy Claude settings into Grok. Separate from the files Grok already reads.</dd>
+        <dt>/copy</dt><dd>Copy the last reply. <code>/btw</code> asks a side question without derailing the task.</dd>
+      </dl>
+    </section>
+    <section id="help-claude" hidden>
+      <h2>Claude Code</h2>
+      <p>The deck starts it with <code>--remote-control</code> and the session name, so the same session shows up in the Claude phone app.</p>
+      <p class="note"><code>CLAUDE.md</code> is the file Grok also reads. Auto-memory notes under <code>~/.claude/projects/…/memory/</code> stay with Claude.</p>
+      <h3>Slash commands</h3>
+      <dl>
+        <dt>/init</dt><dd>Write a starter <code>CLAUDE.md</code> for this repo.</dd>
+        <dt>/memory</dt><dd>Edit <code>CLAUDE.md</code> and the auto-memory notes.</dd>
+        <dt>/plan</dt><dd>Plan before a large change. <code>/model</code> and <code>/effort</code> change model and reasoning.</dd>
+        <dt>/compact</dt><dd>Summarize the conversation. <code>/context</code> shows what is loaded. <code>/clear</code> starts fresh and keeps project memory.</dd>
+        <dt>/permissions</dt><dd>Allow, ask, or deny tool rules for this session.</dd>
+        <dt>/remote-control</dt><dd>Already on for sessions started from the deck. Alias <code>/rc</code>.</dd>
+        <dt>/rewind</dt><dd>Roll code and conversation back to a checkpoint.</dd>
+        <dt>/resume</dt><dd>Return to an earlier conversation.</dd>
+        <dt>/mcp</dt><dd>MCP servers. <code>/diff</code> shows the change.</dd>
+      </dl>
+    </section>
+    <section id="help-codex" hidden>
+      <h2>Codex</h2>
+      <p>OpenAI’s terminal agent. <code>/init</code> writes <code>AGENTS.md</code>, which Grok also loads when that file is in the repo.</p>
+      <h3>Slash commands</h3>
+      <dl>
+        <dt>/model</dt><dd>Model and reasoning effort for this chat.</dd>
+        <dt>/approvals</dt><dd>What Codex may do without asking.</dd>
+        <dt>/plan</dt><dd>Plan mode for a multi-step change.</dd>
+        <dt>/compact</dt><dd>Summarize the conversation to free the window.</dd>
+        <dt>/review</dt><dd>Review the working tree. <code>/diff</code> shows the git diff, including untracked files.</dd>
+        <dt>/init</dt><dd>Scaffold <code>AGENTS.md</code> in this directory.</dd>
+        <dt>/status</dt><dd>Model, context usage, and rate limits.</dd>
+        <dt>/new</dt><dd>Fresh chat in the same repo. <code>/resume</code> opens an older one.</dd>
+        <dt>/mcp</dt><dd>List configured MCP tools.</dd>
+      </dl>
+    </section>
+    <section id="help-opencode" hidden>
+      <h2>OpenCode</h2>
+      <p>The model list in the create dialog is read from your OpenCode config (<code>~/.config/opencode/opencode.json[c]</code>): every provider and model you have defined there.</p>
+      <h3>Slash commands</h3>
+      <dl>
+        <dt>/models</dt><dd>Pick a model. Ctrl+X then M does the same.</dd>
+        <dt>/new</dt><dd>New session. Alias <code>/clear</code>. Ctrl+X then N.</dd>
+        <dt>/sessions</dt><dd>Switch session. Aliases <code>/resume</code> and <code>/continue</code>.</dd>
+        <dt>/compact</dt><dd>Summarize this session. Alias <code>/summarize</code>.</dd>
+        <dt>/undo</dt><dd>Revert the last turn and its file changes. <code>/redo</code> puts them back. Both need a git repo.</dd>
+        <dt>/init</dt><dd>Create or update <code>AGENTS.md</code>.</dd>
+        <dt>/connect</dt><dd>Add a provider and its key.</dd>
+        <dt>/btw</dt><dd>Side question. The answer is not added to the conversation.</dd>
+        <dt>/share</dt><dd>Public link to this session. <code>/unshare</code> takes it down.</dd>
+      </dl>
+    </section>
+    <section id="help-shell" hidden>
+      <h2>Shell</h2>
+      <p>A plain shell in the project directory. No agent, so there are no slash commands.</p>
+      <p>From an agent card, <strong>Empty shell</strong> (or <strong>sh</strong> while you are attached) opens a shell in that session’s directory. If the agent is waiting on a permission question, the command is copied into the compose box. It runs when you send it.</p>
+    </section>
+    <section id="help-agy" hidden>
+      <h2>Antigravity</h2>
+      <p>Google’s replacement for Gemini CLI. The ＋ menu starts it as Antigravity, which runs <code>agy</code> in the project directory.</p>
+      <p><code>agy --continue</code> resumes the last conversation. <code>agy remote-control</code> keeps the machine reachable from another device. Inside a session, type <code>/</code> for its commands. <code>/copy</code> copies the last response.</p>
+      <p><code>agy update</code> brings the binary up to the current release. <code>antigravity-ide</code> on the PATH is the separate desktop app.</p>
+    </section>
+  </div>
+</div>
+
+<div id="term" hidden></div>
+<div id="status" hidden></div>
+
+<div id="composebar" hidden>
+  <textarea id="compose" rows="1" placeholder="Type here · ⏎ sends" enterkeyhint="send"
+            autocomplete="off" autocapitalize="sentences" spellcheck="true"></textarea>
+  <button id="sendBtn" aria-label="Send">➤</button>
+</div>
+
+<div id="ctrlbar" hidden>
+  <button id="hideKbBtn" title="Hide the keyboard" aria-label="Hide the keyboard"><svg class="kbHide" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" d="M5 9l7 7 7-7"/></svg><svg class="kbShow" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7"/></svg></button>
+  <button id="kbBtn" title="Type straight into the terminal">⌨</button>
+  <button id="ctrlBtn" data-key="ctrl">Ctrl</button>
+  <button data-seq="\x03">^C</button>
+  <button data-seq="\x1b">Esc</button>
+  <button data-seq="\t">Tab</button>
+  <button data-seq="\x1b[Z">⇧Tab</button>
+  <button data-seq="\r">⏎</button>
+  <button data-seq="\x1b\r">Alt⏎</button>
+  <button data-seq="\x1b[A">↑</button>
+  <button data-seq="\x1b[B">↓</button>
+  <button data-seq="\x1b[D">←</button>
+  <button data-seq="\x1b[C">→</button>
+  <button data-seq="\x7f">⌫</button>
+  <button id="pasteBtn">📋</button>
+  <button id="shellKey" title="Empty shell in this directory">sh</button>
+</div>
+
+<dialog id="createDlg">
+  <strong>New session</strong>
+  <label>Project (cwd)</label>
+  <input id="cProjectFilter" type="search" placeholder="Search projects…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <select id="cProject" size="8"><option value="">~/projects</option></select>
+  <label>Agent</label>
+  <select id="cLauncher"></select>
+  <label id="cModelLabel" hidden>Model</label>
+  <select id="cModel" hidden></select>
+  <label>Session name</label>
+  <input id="cName" placeholder="auto" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <div class="row">
+    <button id="createCancel" class="secondary">Cancel</button>
+    <button id="createGo" class="primary">Create</button>
+  </div>
+</dialog>
+
+<dialog id="sessDlg">
+  <strong id="sessDlgTitle"></strong>
+  <div class="hint" id="sessDlgSub"></div>
+  <pre id="sessDlgCmd" hidden></pre>
+  <div class="hint">Empty shell opens in this directory. A command waiting on permission is copied into the box, and runs when you send it.</div>
+  <div class="row">
+    <button id="killBtn">Kill session</button>
+    <button id="shellBtn" class="secondary">Empty shell</button>
+    <button id="sessCancel" class="secondary">Close</button>
+  </div>
+</dialog>
+
+<dialog id="detachDlg">
+  <strong>Detach other viewer?</strong>
+  <div class="hint">This session already has another client attached. Proceeding detaches it so this phone can take the window size.</div>
+  <div class="row">
+    <button type="button" id="detachCancel" class="secondary">Cancel</button>
+    <button type="button" id="detachGo" class="primary">Proceed</button>
+  </div>
+</dialog>
+
+<dialog id="setDlg">
+  <strong>Settings</strong>
+  <label>Theme</label>
+  <select id="sTheme"><option value="light">Light</option><option value="dark">Dark</option></select>
+  <label>Terminal font size</label>
+  <select id="sFont"></select>
+  <div class="row">
+    <button id="setClose" class="primary">Done</button>
+  </div>
+</dialog>
+
+<script src="/static/xterm.js"></script>
+<script src="/static/xterm-addon-fit.js"></script>
+<script src="/static/xterm-addon-unicode11.js"></script>
+<script>
+const deckEl = document.getElementById('deck');
+const deckEmptyEl = document.getElementById('deckEmpty');
+const deckFilterEl = document.getElementById('deckFilter');
+const deckNoMatchEl = document.getElementById('deckNoMatch');
+const helpEl = document.getElementById('help');
+const termEl = document.getElementById('term');
+const statusEl = document.getElementById('status');
+const ctrlbarEl = document.getElementById('ctrlbar');
+const ctrlBtn = document.getElementById('ctrlBtn');
+const titleEl = document.getElementById('title');
+const backBtn = document.getElementById('backBtn');
+const composeBar = document.getElementById('composebar');
+const composeEl = document.getElementById('compose');
+const kbBtn = document.getElementById('kbBtn');
+// Raw mode = type into xterm.js directly (old behaviour); default is compose.
+let rawMode = localStorage.getItem('gd_raw') === '1';
+const drafts = {};  // unsent compose text, per session
+
+let term = null, fitAddon = null, ws = null, current = null;
+let ctrlArmed = false, longPressTimer = null;
+let reconnectTimer = null, reconnectDelay = 0, closing = false;
+
+// --- settings ---------------------------------------------------------------
+const settings = {
+  get theme() { return localStorage.getItem('gd_theme') || 'light'; },
+  set theme(v) { localStorage.setItem('gd_theme', v); applyTheme(); },
+  get font() { return parseInt(localStorage.getItem('gd_font') || '13', 10); },
+  set font(v) { localStorage.setItem('gd_font', String(v)); applyFont(); },
+};
+function themeColors() {
+  const s = getComputedStyle(document.documentElement);
+  return {
+    background: s.getPropertyValue('--bg').trim(),
+    foreground: s.getPropertyValue('--fg').trim(),
+    cursor: s.getPropertyValue('--accent').trim(),
+    cursorAccent: s.getPropertyValue('--bg').trim(),
+    selectionBackground: s.getPropertyValue('--accent').trim() + '55',
+  };
+}
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', settings.theme);
+  if (term) { term.options.theme = themeColors(); }
+}
+function applyFont() {
+  if (!term) return;
+  term.options.fontSize = settings.font;
+  applyViewport();
+}
+applyTheme();
+
+async function api(path, opts = {}) {
+  return fetch(path, opts);
+}
+
+// --- deck -------------------------------------------------------------------
+function ago(ts) {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+async function loadSessions() {
+  let data;
+  try { data = await (await api('/api/sessions')).json(); } catch { return; }
+  const sessions = data.sessions || [];
+  deckEmptyEl.hidden = sessions.length > 0;
+  deckFilterEl.hidden = sessions.length === 0;
+  const seen = new Set();
+  for (const s of sessions) {
+    seen.add(s.name);
+    let card = deckEl.querySelector('.card[data-name="' + CSS.escape(s.name) + '"]');
+    const busy = !s.attached && (Date.now() / 1000 - s.activity) < 60;
+    const dir = (s.path || '').split('/').pop();
+    const bits = [s.command, dir, ago(s.activity)].filter(Boolean);
+    const subText = bits.join(' · ');
+    if (!card) {
+      // session names come from tmux and can contain anything — build the node
+      // with createTextNode, never concatenate into innerHTML
+      card = document.createElement('div');
+      card.dataset.name = s.name;
+
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      card.appendChild(dot);
+
+      const body = document.createElement('div');
+      body.className = 'body';
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.appendChild(document.createTextNode(s.name));
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      body.appendChild(name);
+      body.appendChild(sub);
+      card.appendChild(body);
+
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.hidden = true;
+      badge.title = 'Permission or command waiting';
+      badge.appendChild(document.createTextNode('!'));
+      card.appendChild(badge);
+
+      const menu = document.createElement('button');
+      menu.className = 'menu';
+      menu.appendChild(document.createTextNode('⋯'));
+      card.appendChild(menu);
+
+      card.addEventListener('touchstart', () => {
+        card.dataset.long = '';
+        longPressTimer = setTimeout(() => {
+          card.dataset.long = '1';
+          sessionMenu(card.dataset.name, card.dataset.sub || '', card.dataset.pending || null);
+        }, 600);
+      }, { passive: true });
+      card.addEventListener('touchend', () => clearTimeout(longPressTimer));
+      card.addEventListener('touchmove', () => clearTimeout(longPressTimer));
+      deckEl.appendChild(card);
+    }
+    card.className = 'card' + (s.attached ? ' attached' : '') + (busy ? ' busy' : '');
+    card.dataset.attached = s.attached ? '1' : '0';
+    card.dataset.sub = subText;
+    card.dataset.pending = s.pending || '';
+    // Drop /home/<user>/ so "home" doesn't match every card.
+    const where = (s.path || '').replace(/^\/home\/[^/]+\/?/, '');
+    card.dataset.search = [s.name, s.command, where].filter(Boolean).join(' ').toLowerCase();
+    card.querySelector('.sub').textContent = subText;
+    let pv = card.querySelector('.preview');
+    if (s.preview && s.preview.length) {
+      if (!pv) {
+        pv = document.createElement('div');
+        pv.className = 'preview';
+        card.querySelector('.body').appendChild(pv);
+      }
+      // Pane text is untrusted like session names: textContent only.
+      while (pv.firstChild) pv.removeChild(pv.firstChild);
+      for (const line of s.preview) {
+        const l = document.createElement('div');
+        l.textContent = line;
+        pv.appendChild(l);
+      }
+    } else if (pv) {
+      pv.remove();
+    }
+    const badge = card.querySelector('.badge');
+    badge.hidden = !s.pending;
+    badge.title = s.pending || '';
+    card.querySelector('.menu').onclick = (e) => {
+      e.stopPropagation();
+      sessionMenu(s.name, subText, s.pending);
+    };
+    card.onclick = (e) => {
+      // A long-press opens the menu and then the browser still fires click.
+      if (card.dataset.long === '1') {
+        card.dataset.long = '';
+        e.preventDefault();
+        return;
+      }
+      requestAttach(s.name, !!s.attached);
+    };
+    card.oncontextmenu = (e) => {
+      e.preventDefault();
+      sessionMenu(s.name, subText, s.pending);
+    };
+  }
+  for (const card of [...deckEl.querySelectorAll('.card')]) {
+    if (!seen.has(card.dataset.name)) card.remove();
+  }
+  filterDeck();
+}
+
+// Hides non-matching cards in place (cards are divs, so `hidden` works in
+// Safari too). Every space-separated term must appear in the session name,
+// command, or path: "claude grok" finds Claude running in couchdeck.
+function filterDeck() {
+  const terms = deckFilterEl.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  let shown = 0;
+  for (const card of deckEl.querySelectorAll('.card')) {
+    const hay = card.dataset.search || '';
+    card.hidden = !terms.every(t => hay.includes(t));
+    if (!card.hidden) shown++;
+  }
+  deckNoMatchEl.hidden = !terms.length || shown > 0 || deckFilterEl.hidden;
+}
+deckFilterEl.addEventListener('input', filterDeck);
+deckFilterEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    // Enter attaches the first match, so "type a few letters, go" works.
+    e.preventDefault();
+    const first = deckEl.querySelector('.card:not([hidden])');
+    if (first) { deckFilterEl.blur(); first.click(); }
+  } else if (e.key === 'Escape') {
+    deckFilterEl.value = '';
+    filterDeck();
+  }
+});
+
+// Poll while the deck is on screen, so the green/amber dots mean something.
+// Paused when the tab is hidden, and never while a terminal is attached.
+setInterval(() => {
+  if (!document.hidden && !current) loadSessions();
+}, 5000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !current) loadSessions(); });
+
+function showDeck() {
+  closing = true;
+  clearTimeout(reconnectTimer);
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  if (term) { term.dispose(); term = null; fitAddon = null; }
+  current = null;
+  helpReturn = null;
+  termEl.hidden = true;
+  statusEl.hidden = true;
+  ctrlbarEl.hidden = true;
+  composeBar.hidden = true;
+  composeEl.blur();
+  helpEl.hidden = true;
+  deckEl.hidden = false;
+  backBtn.hidden = true;
+  titleEl.textContent = 'couchdeck';
+  deckFilterEl.value = '';
+  loadSessions();
+}
+backBtn.onclick = () => {
+  if (!helpEl.hidden) { hideHelp(); return; }
+  showDeck();
+};
+
+let helpReturn = null;  // 'deck' | 'term' — Help must not tear down a live attach
+
+function showHelp() {
+  if (!helpEl.hidden) return;
+  helpReturn = current ? 'term' : 'deck';
+  // Overlay on top of the live term: do NOT call showDeck() (that closes the WS).
+  if (current) {
+    termEl.hidden = true;
+    statusEl.hidden = true;
+    ctrlbarEl.hidden = true;
+    composeBar.hidden = true;
+    composeEl.blur();
+  } else {
+    deckEl.hidden = true;
+  }
+  helpEl.hidden = false;
+  backBtn.hidden = false;
+  titleEl.textContent = 'CLIs';
+  renderLauncherNotes();
+}
+
+function hideHelp() {
+  helpEl.hidden = true;
+  const back = helpReturn;
+  helpReturn = null;
+  if (back === 'term' && current) {
+    termEl.hidden = false;
+    ctrlbarEl.hidden = false;
+    applyInputMode();
+    titleEl.textContent = current;
+    backBtn.hidden = false;
+    setStatus(statusEl.textContent, statusTap);  // keep a tap action across help
+    return;
+  }
+  deckEl.hidden = false;
+  backBtn.hidden = true;
+  titleEl.textContent = 'couchdeck';
+  loadSessions();
+}
+document.getElementById('helpBtn').onclick = showHelp;
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || helpEl.hidden) return;
+  e.preventDefault();
+  e.stopPropagation();
+  hideHelp();
+});
+document.getElementById('helpTabs').onclick = (e) => {
+  const btn = e.target.closest('button[data-help]');
+  if (!btn) return;
+  for (const b of document.querySelectorAll('#helpTabs button')) {
+    b.classList.toggle('active', b === btn);
+  }
+  for (const pane of document.querySelectorAll('#helpBody > section')) {
+    pane.hidden = pane.id !== 'help-' + btn.dataset.help;
+  }
+};
+
+// --- terminal ---------------------------------------------------------------
+let statusTap = null;
+statusEl.addEventListener('click', () => { if (statusTap) statusTap(); });
+// onTap makes the line a button; any later status clears it.
+function setStatus(msg, onTap = null) {
+  statusTap = msg ? onTap : null;
+  statusEl.classList.toggle('tap', !!statusTap);
+  statusEl.textContent = msg || '';
+  // Help covers the terminal. A reconnect must not pop the status line over it.
+  statusEl.hidden = !msg || !helpEl.hidden;
+  applyViewport();
+}
+
+let detachTarget = null;
+const detachDlg = document.getElementById('detachDlg');
+document.getElementById('detachCancel').onclick = () => { detachTarget = null; detachDlg.close(); };
+document.getElementById('detachGo').onclick = () => {
+  const name = detachTarget;
+  detachTarget = null;
+  detachDlg.close();
+  if (name) attach(name);
+};
+
+async function requestAttach(name, alreadyAttached) {
+  // Reconnect while we already own the view must not re-prompt.
+  if (current === name) { attach(name); return; }
+  // The card's attached flag is up to 5s stale. Re-read before attach -d
+  // kicks whoever is actually on the session.
+  let attached = !!alreadyAttached;
+  try {
+    const data = await (await api('/api/sessions')).json();
+    const s = (data.sessions || []).find(x => x.name === name);
+    if (s) attached = !!s.attached;
+  } catch {}
+  if (attached) {
+    detachTarget = name;
+    detachDlg.showModal();
+    return;
+  }
+  attach(name);
+}
+
+function attach(name) {
+  closing = true;                       // tear down cleanly before re-arming
+  clearTimeout(reconnectTimer);
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  if (term) { term.dispose(); term = null; }
+  current = name;
+  reconnectDelay = 0;
+  deckEl.hidden = true;
+  helpEl.hidden = true;
+  termEl.hidden = false;
+  backBtn.hidden = false;
+  ctrlbarEl.hidden = false;
+  composeEl.value = drafts[name] || '';
+  applyInputMode();
+  titleEl.textContent = name;
+
+  term = new Terminal({
+    fontSize: settings.font,
+    fontFamily: '"Berkeley Mono", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace',
+    theme: themeColors(),
+    cursorBlink: true,
+    scrollback: 3000,
+    allowProposedApi: true,
+  });
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  // Unicode 11 width tables: without this, emoji and wide glyphs in TUIs
+  // (grok, opencode, claude) take one cell in xterm.js but two in tmux, so
+  // every line after them drifts.
+  term.loadAddon(new Unicode11Addon.Unicode11Addon());
+  term.unicode.activeVersion = '11';
+  term.open(termEl);
+  fitRetry = 0;
+  applyViewport();  // debounced fitTerminal — same path as keyboard resize
+  // Extra passes: tablets often lay out #term a frame or two after open.
+  setTimeout(fitTerminal, 0);
+  setTimeout(fitTerminal, 100);
+  setTimeout(fitTerminal, 300);
+
+  term.onData(d => send(withCtrl(d)));
+  term.onResize(({ cols, rows }) => {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+  });
+
+  connect();
+}
+
+function connect() {
+  if (!current || !term) return;
+  closing = false;
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/term`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    reconnectDelay = 0;
+    setStatus('');
+    ws.send(JSON.stringify({ session: current, cols: term.cols, rows: term.rows }));
+    // Compose mode leaves the keyboard down until the user taps: read first.
+    if (rawMode) term.focus();
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      try {
+        const m = JSON.parse(ev.data);
+        if (m.type === 'error') { setStatus(m.message); closing = true; }
+      } catch {}
+    } else {
+      term.write(new Uint8Array(ev.data));
+    }
+  };
+  // A phone roams between Wi-Fi and LTE constantly and the socket dies with it.
+  // Reattaching is cheap (tmux holds all the state), so retry with backoff
+  // rather than making the user tap back to the deck and in again.
+  ws.onclose = (ev) => {
+    ws = null;
+    if (closing || !current) return;
+    // tmux ended this client itself (codes from the server's term_ws). Do NOT
+    // reattach: that is attach -d, which kicks the device that just took the
+    // session, whose page kicks back; two open pages traded it every second.
+    if (ev.code === 4409) {
+      closing = true;
+      const name = current;
+      setStatus('Opened on another device. Tap here to take it back.', () => attach(name));
+      return;
+    }
+    if (ev.code === 4410) {
+      closing = true;
+      setStatus('This session has ended.');
+      return;
+    }
+    // While the tab is hidden, flaky LTE would thrash attach -d and kick a
+    // desktop viewer every few seconds. Pause until the page is visible again.
+    if (document.visibilityState === 'hidden') {
+      setStatus('paused (tab hidden)');
+      return;
+    }
+    reconnectDelay = Math.min(reconnectDelay ? reconnectDelay * 2 : 1000, 10000);
+    setStatus('reconnecting in ' + Math.round(reconnectDelay / 1000) + 's…');
+    reconnectTimer = setTimeout(() => { setStatus('reconnecting…'); connect(); }, reconnectDelay);
+  };
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!current || closing || ws) return;
+  clearTimeout(reconnectTimer);
+  setStatus('reconnecting…');
+  connect();
+});
+
+
+
+function clearIosSelection() {
+  try {
+    const sel = window.getSelection && window.getSelection();
+    if (sel && sel.removeAllRanges) sel.removeAllRanges();
+  } catch {}
+}
+
+function send(str) {
+  if (ws && ws.readyState === 1) ws.send(new TextEncoder().encode(str));
+}
+
+// Ctrl is a sticky modifier: the next key becomes its control code (c -> ^C).
+function withCtrl(d) {
+  if (!ctrlArmed) return d;
+  ctrlArmed = false;
+  ctrlBtn.classList.remove('active');
+  const code = d.toUpperCase().charCodeAt(0);
+  return (code >= 63 && code <= 95) ? String.fromCharCode(code - 64) : d;
+}
+
+// Multi-line text goes as a bracketed paste so a TUI inserts the newlines
+// instead of submitting at each one. The Enter is a separate, slightly later
+// write: TUIs that detect pastes by timing (Claude Code) treat "text\r" in one
+// chunk as pasted text with a newline, not a submit.
+function sendText(text, submit) {
+  text = text.replace(/\r\n?/g, '\n');
+  if (text.includes('\n')) send('\x1b[200~' + text + '\x1b[201~');
+  else if (text) send(text);
+  if (submit) setTimeout(() => send('\r'), text ? 40 : 0);
+}
+
+// --- compose bar ------------------------------------------------------------
+function applyInputMode() {
+  kbBtn.classList.toggle('active', rawMode);
+  composeBar.hidden = !current || rawMode;
+  autosize();
+  applyViewport();
+}
+function focusInput() {
+  if (!term) return;
+  if (rawMode) term.focus(); else composeEl.focus();
+}
+function autosize() {
+  composeEl.style.height = 'auto';
+  // +2 for the border (border-box); CSS max-height caps the growth.
+  composeEl.style.height = (composeEl.scrollHeight + 2) + 'px';
+}
+function submitCompose() {
+  clearIosSelection();
+  const text = composeEl.value;
+  composeEl.value = '';
+  if (current) drafts[current] = '';
+  autosize();
+  sendText(text, true);
+}
+
+let composing = false;   // an IME word is still underlined / uncommitted
+let newlineOk = false;   // Shift+Enter on a hardware keyboard inserts a newline
+const isLineBreak = (t) => t === 'insertLineBreak' || t === 'insertParagraph';
+
+// Ctrl consumed a letter mid-composition. The IME then commits that same
+// letter again (an insertText, with or without a compositionend first), so
+// remember what the box should hold and swallow the echo.
+let ctrlRestore = null;   // { value, data }
+composeEl.addEventListener('compositionstart', () => { composing = true; });
+composeEl.addEventListener('compositionend', () => {
+  composing = false;
+  if (ctrlRestore !== null) {
+    const { value } = ctrlRestore;
+    // after the IME's own commit has landed
+    setTimeout(() => {
+      if (ctrlRestore === null) return;  // the input handler already did it
+      ctrlRestore = null;
+      composeEl.value = value;
+      autosize();
+    }, 0);
+  }
+});
+composeEl.addEventListener('keydown', (e) => {
+  newlineOk = e.key === 'Enter' && e.shiftKey;
+  // keyCode 229 = the IME owns this key; beforeinput below catches its Enter.
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+    e.preventDefault();
+    submitCompose();
+  }
+});
+composeEl.addEventListener('beforeinput', (e) => {
+  if (isLineBreak(e.inputType) && !newlineOk) {
+    e.preventDefault();
+    submitCompose();
+  } else if (ctrlArmed && e.inputType === 'insertText' && e.data) {
+    e.preventDefault();
+    send(withCtrl(e.data.slice(-1)));
+  }
+});
+composeEl.addEventListener('input', (e) => {
+  if (ctrlRestore !== null) {
+    const echo = e.data === ctrlRestore.data;
+    if (echo) composeEl.value = ctrlRestore.value;
+    ctrlRestore = null;
+    if (echo) { autosize(); return; }
+  }
+  const p = composeEl.selectionStart;
+  // A keyboard that commits Enter without a cancelable beforeinput.
+  if (isLineBreak(e.inputType) && !newlineOk && composeEl.value[p - 1] === '\n') {
+    composeEl.value = composeEl.value.slice(0, p - 1) + composeEl.value.slice(p);
+    submitCompose();
+    return;
+  }
+  // Ctrl armed while the IME composes (insertCompositionText can't be
+  // cancelled): the letter already landed in the box, so take it back out.
+  if (ctrlArmed && e.data && p > 0) {
+    composeEl.value = composeEl.value.slice(0, p - 1) + composeEl.value.slice(p);
+    if (composing) ctrlRestore = { value: composeEl.value, data: e.data };
+    send(withCtrl(e.data.slice(-1)));
+  }
+  if (current) drafts[current] = composeEl.value;
+  autosize();
+});
+
+const sendBtn = document.getElementById('sendBtn');
+// mousedown default would move focus to the button and drop the keyboard.
+sendBtn.addEventListener('mousedown', (e) => e.preventDefault());
+sendBtn.onclick = () => {
+  if (composing) {
+    // Clearing the box under a live composition makes Gboard re-insert the
+    // word. Blurring commits it first; refocus keeps the keyboard up.
+    composeEl.blur();
+    submitCompose();
+    composeEl.focus();
+  } else {
+    submitCompose();
+  }
+};
+
+// A tap on the terminal, in compose mode: tmux still gets its click (grok's
+// [Opt in] buttons, pane selection), but the caret goes to the compose box.
+// Cancelling the touch stops the synthetic mousedown that would otherwise
+// focus xterm.js's own textarea — the input path this bar exists to avoid.
+function cellAt(x, y) {
+  const screen = term && termEl.querySelector('.xterm-screen');
+  const cell = screen && term._core._renderService.dimensions.css.cell;
+  if (!cell || !(cell.width > 0) || !(cell.height > 0)) return { col: 1, row: 1 };
+  const r = screen.getBoundingClientRect();
+  return {
+    col: Math.min(term.cols, Math.max(1, Math.floor((x - r.left) / cell.width) + 1)),
+    row: Math.min(term.rows, Math.max(1, Math.floor((y - r.top) / cell.height) + 1)),
+  };
+}
+function clickAt(x, y) {
+  if (!term || term.modes.mouseTrackingMode === 'none') return;
+  const { col, row } = cellAt(x, y);
+  send(`\x1b[<0;${col};${row}M\x1b[<0;${col};${row}m`);
+}
+
+// --- viewport ---------------------------------------------------------------
+window.addEventListener('resize', () => { applyViewport(); });
+// iOS/Android keyboards overlay rather than resize the layout viewport, so pin
+// body height + offset to visualViewport to keep the key bar above the keyboard.
+let fitTimer = 0;
+let fitRetry = 0;
+function fitTerminal() {
+  // Size from #term's content box + xterm's cell metrics. Do NOT use FitAddon.fit()
+  // as the source of truth: it reads getComputedStyle(parent).height, which on
+  // Chrome (esp. with the soft keyboard) can be one row taller than clientHeight.
+  if (!term || termEl.hidden) return;
+  const core = term._core;
+  let cell = core && core._renderService && core._renderService.dimensions.css.cell;
+  if (!cell || !(cell.width > 0) || !(cell.height > 0)) {
+    // Cell metrics are not ready yet (first paint) — bootstrap once, then retry.
+    if (fitAddon) { try { fitAddon.fit(); } catch {} }
+    cell = core && core._renderService && core._renderService.dimensions.css.cell;
+    if (!cell || !(cell.width > 0) || !(cell.height > 0)) {
+      if (fitRetry < 20) {
+        fitRetry++;
+        clearTimeout(fitTimer);
+        fitTimer = setTimeout(fitTerminal, 50);
+      }
+      return;
+    }
+  }
+  const cs = getComputedStyle(termEl);
+  const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  const availW = termEl.clientWidth - padX;
+  const availH = termEl.clientHeight - padY;
+  // Tablet/phone: #term is often still 0×0 on the first frame after un-hiding.
+  // Resizing the PTY to 1 row then crushes grok to a lone ">" with a blank page.
+  // Wait for a real box instead of locking in that size.
+  if (availW < 40 || availH < 40) {
+    if (fitRetry < 30) {
+      fitRetry++;
+      clearTimeout(fitTimer);
+      fitTimer = setTimeout(() => {
+        requestAnimationFrame(fitTerminal);
+      }, 50);
+    }
+    return;
+  }
+  fitRetry = 0;
+  const cols = Math.max(2, Math.floor(availW / cell.width));
+  const rows = Math.max(2, Math.floor(availH / cell.height));
+  if (term.cols !== cols || term.rows !== rows) {
+    term.resize(cols, rows);
+  }
+  term.scrollToBottom();
+}
+function pinToVisualViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  document.body.style.height = vv.height + 'px';
+  document.body.style.top = vv.offsetTop + 'px';
+}
+function applyViewport() {
+  pinToVisualViewport();
+  // Keyboard open/close changes height — refit after it settles. Do NOT refit
+  // on visualViewport *scroll* (finger rubber-band): that resizes mid-slide and
+  // garbles full-screen TUIs.
+  clearTimeout(fitTimer);
+  fitTimer = setTimeout(() => {
+    requestAnimationFrame(() => requestAnimationFrame(fitTerminal));
+  }, 120);
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', applyViewport);
+  window.visualViewport.addEventListener('scroll', pinToVisualViewport);
+  applyViewport();
+}
+// When #term flexes to its real size (tablet landscape, keyboard dismiss), refit.
+// Without this we can stay stuck at the first 0-height → 1-row PTY size.
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => {
+    if (!term || termEl.hidden) return;
+    applyViewport();
+  }).observe(termEl);
+}
+
+// --- create dialog ----------------------------------------------------------
+const createDlg = document.getElementById('createDlg');
+const cLauncher = document.getElementById('cLauncher');
+const cModel = document.getElementById('cModel');
+const cModelLabel = document.getElementById('cModelLabel');
+const cProject = document.getElementById('cProject');
+const cProjectFilter = document.getElementById('cProjectFilter');
+const cName = document.getElementById('cName');
+let launchers = [];
+let projectsLoaded = false;
+let allProjects = [];
+
+// Rebuild the option list rather than toggling option.hidden: Safari (iOS
+// and macOS) ignores hidden/display:none on <option>, so hiding filters
+// nothing there.
+function filterProjects() {
+  const q = (cProjectFilter.value || '').trim().toLowerCase();
+  const prev = cProject.value;
+  const matches = allProjects.filter(p => !q || p.toLowerCase().includes(q));
+  const root = document.createElement('option');
+  root.value = ''; root.textContent = '~/projects';  // keep the ~/projects root
+  const opts = [root];
+  for (const p of matches) {
+    const o = document.createElement('option');
+    o.value = p; o.textContent = p;
+    opts.push(o);
+  }
+  cProject.replaceChildren(...opts);
+  // Keep the selection if it survived; otherwise, while searching, jump to
+  // the first match (iOS shows a select as one line, so this is the only
+  // visible feedback that the filter did anything).
+  if (prev && matches.includes(prev)) cProject.value = prev;
+  else if (q && matches.length) cProject.value = matches[0];
+  else cProject.value = '';
+  if (cProject.value !== prev) suggestName();
+}
+
+function renderModels() {
+  const l = launchers.find(x => x.id === cLauncher.value);
+  const has = l && l.models && l.models.length;
+  cModel.hidden = cModelLabel.hidden = !has;
+  cModel.replaceChildren();
+  if (!has) return;
+  for (const m of l.models) {
+    const o = document.createElement('option');
+    o.value = m.id;
+    o.textContent = m.label;     // provider-supplied text; textContent, not innerHTML
+    if (m.id === l.default_model) o.selected = true;
+    cModel.appendChild(o);
+  }
+}
+
+function suggestName() {
+  const proj = cProject.value || 'proj';
+  const base = (proj + '-' + cLauncher.value).replace(/[^A-Za-z0-9_-]/g, '-');
+  cName.placeholder = base;
+}
+
+async function loadLaunchers() {
+  if (launchers.length) return;
+  try {
+    launchers = (await (await api('/api/launchers')).json()).launchers;
+    for (const l of launchers) {
+      const o = document.createElement('option');
+      o.value = l.id; o.textContent = l.label;
+      cLauncher.appendChild(o);
+    }
+  } catch {}
+}
+
+// "Your launchers" in the CLI guide: one line per launcher whose config entry
+// has a note. Labels and notes are config text: textContent, never innerHTML.
+async function renderLauncherNotes() {
+  await loadLaunchers();
+  const box = document.getElementById('launcherNotes');
+  const list = document.getElementById('launcherNotesList');
+  const withNotes = launchers.filter(l => l.note);
+  list.replaceChildren();
+  for (const l of withNotes) {
+    const dt = document.createElement('dt');
+    dt.textContent = l.label;
+    const dd = document.createElement('dd');
+    dd.textContent = l.note;
+    list.append(dt, dd);
+  }
+  box.hidden = withNotes.length === 0;
+}
+
+document.getElementById('newBtn').onclick = async () => {
+  if (!projectsLoaded) {
+    try {
+      const data = await (await api('/api/projects')).json();
+      allProjects = data.projects;
+      projectsLoaded = true;
+    } catch {}
+  }
+  await loadLaunchers();
+  cProjectFilter.value = '';
+  filterProjects();
+  renderModels();
+  suggestName();
+  createDlg.showModal();
+  // Focus search so the phone keyboard is ready to filter a long list.
+  try { cProjectFilter.focus(); } catch {}
+};
+cLauncher.onchange = () => { renderModels(); suggestName(); };
+cProject.onchange = suggestName;
+cProjectFilter.addEventListener('input', filterProjects);
+cProjectFilter.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    // Enter in search keeps the first visible project and moves to agent.
+    filterProjects();
+    cLauncher.focus();
+  }
+});
+
+document.getElementById('createCancel').onclick = () => createDlg.close();
+document.getElementById('createGo').onclick = async () => {
+  const name = cName.value.trim() || cName.placeholder;
+  if (!name) return;
+  const r = await api('/api/sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name,
+      project: cProject.value || null,
+      launcher: cLauncher.value,
+      model: (!cModel.hidden && cModel.value) || null,
+    }),
+  });
+  if (!r.ok) { alert((await r.json()).detail); return; }
+  createDlg.close();
+  cName.value = '';
+  attach(name);
+};
+
+// --- session menu -----------------------------------------------------------
+const sessDlg = document.getElementById('sessDlg');
+const sessDlgCmd = document.getElementById('sessDlgCmd');
+let menuTarget = null;
+function sessionMenu(name, sub, pending) {
+  menuTarget = name;
+  document.getElementById('sessDlgTitle').textContent = name;
+  document.getElementById('sessDlgSub').textContent = sub || '';
+  // Pane text is untrusted, same as the card preview: textContent only.
+  if (pending) {
+    sessDlgCmd.hidden = false;
+    sessDlgCmd.textContent = pending;
+  } else {
+    sessDlgCmd.hidden = true;
+    sessDlgCmd.textContent = '';
+  }
+  sessDlg.showModal();
+}
+document.getElementById('sessCancel').onclick = () => sessDlg.close();
+async function openShell(source) {
+  if (!source) return;
+  const r = await api('/api/sessions/' + encodeURIComponent(source) + '/shell', { method: 'POST' });
+  if (!r.ok) { alert((await r.json()).detail); return; }
+  const data = await r.json();
+  // Into the compose box, not the shell. Sending is a separate tap, so a
+  // command the agent was blocked from running is visible before it runs.
+  if (data.pending) drafts[data.name] = data.pending;
+  sessDlg.close();
+  attach(data.name);
+}
+document.getElementById('shellBtn').onclick = () => openShell(menuTarget);
+document.getElementById('shellKey').onclick = () => openShell(current);
+document.getElementById('killBtn').onclick = async () => {
+  if (!confirm('Kill tmux session "' + menuTarget + '"?')) return;
+  await api('/api/sessions/' + encodeURIComponent(menuTarget), { method: 'DELETE' });
+  sessDlg.close();
+  if (current === menuTarget) showDeck(); else loadSessions();
+};
+
+// --- settings dialog --------------------------------------------------------
+const setDlg = document.getElementById('setDlg');
+const sTheme = document.getElementById('sTheme');
+const sFont = document.getElementById('sFont');
+for (const n of [10, 11, 12, 13, 14, 15, 16, 18]) {
+  const o = document.createElement('option');
+  o.value = String(n); o.textContent = n + ' px';
+  sFont.appendChild(o);
+}
+document.getElementById('settingsBtn').onclick = () => {
+  sTheme.value = settings.theme;
+  sFont.value = String(settings.font);
+  setDlg.showModal();
+};
+sTheme.onchange = () => { settings.theme = sTheme.value; };
+sFont.onchange = () => { settings.font = parseInt(sFont.value, 10); };
+document.getElementById('setClose').onclick = () => setDlg.close();
+
+// --- key bar ----------------------------------------------------------------
+// Keep focus where it is: the mousedown a tap generates would move focus to the
+// button, which blurs the compose box / xterm and drops the soft keyboard.
+ctrlbarEl.addEventListener('mousedown', (e) => e.preventDefault());
+const inputFocused = () =>
+  document.activeElement === composeEl || (term && document.activeElement === term.textarea);
+
+ctrlBtn.onclick = () => {
+  ctrlArmed = !ctrlArmed;
+  ctrlBtn.classList.toggle('active', ctrlArmed);
+  if (ctrlArmed && !inputFocused()) focusInput();  // the next key needs a keyboard
+};
+// Hide the soft keyboard to see the whole terminal; tap again to bring it back.
+// Phones offer no API to close the keyboard: it stays up while a text field has
+// focus, so blurring that field is what drops it (iOS Safari/Chrome, Android).
+// The icon follows focus, so it always shows what the next tap does.
+const hideKbBtn = document.getElementById('hideKbBtn');
+function syncKbBtn() {
+  const up = inputFocused();
+  hideKbBtn.classList.toggle('kbDown', !up);
+  const label = up ? 'Hide the keyboard' : 'Show the keyboard';
+  hideKbBtn.title = label;
+  hideKbBtn.setAttribute('aria-label', label);
+}
+hideKbBtn.onclick = () => {
+  if (inputFocused()) document.activeElement.blur();
+  else focusInput();
+  syncKbBtn();
+};
+// focusout fires before the next element gains focus; wait a tick to read it.
+document.addEventListener('focusin', syncKbBtn);
+document.addEventListener('focusout', () => setTimeout(syncKbBtn, 0));
+syncKbBtn();
+
+kbBtn.onclick = () => {
+  rawMode = !rawMode;
+  try { localStorage.setItem('gd_raw', rawMode ? '1' : '0'); } catch {}
+  applyInputMode();
+  focusInput();
+};
+document.getElementById('pasteBtn').onclick = async () => {
+  clearIosSelection();
+  let text;
+  try { text = await navigator.clipboard.readText(); }
+  catch { text = window.prompt('Paste text to send:'); }
+  if (!text) return;
+  if (rawMode) { sendText(text, false); return; }
+  // Compose mode: into the box, so it can be checked before sending.
+  composeEl.setRangeText(text, composeEl.selectionStart, composeEl.selectionEnd, 'end');
+  if (current) drafts[current] = composeEl.value;
+  autosize();
+  composeEl.focus();
+};
+for (const btn of ctrlbarEl.querySelectorAll('button[data-seq]')) {
+  const seq = btn.dataset.seq
+    .replace(/\\x([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\t/g, '\t').replace(/\\r/g, '\r');
+  btn.onclick = () => { clearIosSelection(); send(seq); };
+}
+
+// --- drag to scroll ---------------------------------------------------------
+// tmux runs with `mouse on`, so it puts the terminal in mouse-reporting mode and
+// swallows the browser's own scrolling. The scrollback also lives in tmux, not in
+// xterm.js's buffer, so term.scrollLines() would show nothing. Translate a finger
+// drag into the SGR wheel events tmux expects; its WheelUpPane binding then does
+// what the desktop gets: an app that tracks the mouse (grok, claude) scrolls its
+// own transcript, a shell scrolls in copy-mode. The server drops the one case
+// that would paint garbage — a full-screen app that doesn't take the mouse
+// (see _wheel_route in app.py). Events carry the finger's cell, so a TUI with
+// several panes scrolls the one under the finger.
+let touchX = 0, touchY = null, touchAccum = 0, touchScrolled = false;
+
+function rowHeight() {
+  return term && term.rows ? termEl.clientHeight / term.rows : 18;
+}
+termEl.addEventListener('contextmenu', (e) => { e.preventDefault(); clearIosSelection(); });
+termEl.addEventListener('touchend', () => { clearIosSelection(); }, { passive: true });
+termEl.addEventListener('touchstart', (e) => {
+  if (e.touches.length !== 1) { touchY = null; return; }
+  touchX = e.touches[0].clientX;
+  touchY = e.touches[0].clientY;
+  touchAccum = 0;
+  touchScrolled = false;
+}, { passive: true });
+termEl.addEventListener('touchmove', (e) => {
+  if (touchY === null || e.touches.length !== 1) return;
+  const y = e.touches[0].clientY;
+  touchAccum += y - touchY;
+  touchY = y;
+  touchX = e.touches[0].clientX;
+  // Claim the gesture after a few px so iOS doesn't rubber-band the visual
+  // viewport (that was shifting the whole page while Grok redrew).
+  if (Math.abs(touchAccum) > 6) {
+    touchScrolled = true;
+    e.preventDefault();
+  }
+  const step = rowHeight();
+  const { col, row } = cellAt(touchX, y);
+  // One wheel notch per row dragged; tmux's binding scrolls 3 lines per notch.
+  while (Math.abs(touchAccum) >= step) {
+    const up = touchAccum > 0;  // dragging down reveals older output
+    touchAccum -= up ? step : -step;
+    send(`\x1b[<${up ? 64 : 65};${col};${row}M`);
+    touchScrolled = true;
+    e.preventDefault();
+  }
+}, { passive: false });
+termEl.addEventListener('touchend', (e) => {
+  const tapped = touchY !== null && !touchScrolled;
+  touchY = null;
+  if (!tapped || rawMode || !term) return;
+  e.preventDefault();  // see clickAt: no synthetic mousedown -> xterm focus
+  const t = e.changedTouches[0];
+  clickAt(t.clientX, t.clientY);
+  composeEl.focus();
+}, { passive: false });
+
+loadSessions();
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+# systemd *user* unit. Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/couchdeck.service ~/.config/systemd/user/
+#   edit the two paths below if the repo is not at ~/couchdeck
+#   systemctl --user daemon-reload && systemctl --user enable --now couchdeck
+# Keep it running after logout:  loginctl enable-linger "$USER"
+[Unit]
+Description=couchdeck (mobile web terminal for tmux sessions)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=-%h/couchdeck/.env
+ExecStart=%h/couchdeck/scripts/run.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

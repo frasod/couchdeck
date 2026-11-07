@@ -1,0 +1,7 @@
+# Files that stay in the private repo and are left out of `git archive`
+# (the clean export used to seed a public repo; see PUBLISH-AUDIT.md).
+CLAUDE.md export-ignore
+ROADMAP.md export-ignore
+PUBLISH-AUDIT.md export-ignore
+OPERATOR.md export-ignore
+scripts/export-release.sh export-ignore
